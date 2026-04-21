@@ -36,6 +36,11 @@ RUN apk add --no-cache \
 # 硬校验 Node 版本 ≥ 20，避免某些发行版降级
 RUN node -v | awk -F. '{ v=substr($1,2)+0; if (v<20) { print "Node too old: "$0; exit 1 } else { print "Node "$0" OK" } }'
 
+# 把上游放在 /app 下的 multica / migrate 二进制暴露到 PATH
+# （上游 Dockerfile 只负责 entrypoint.sh 内部调用，没做链接）
+RUN ln -sf /app/multica /usr/local/bin/multica \
+ && ln -sf /app/migrate /usr/local/bin/migrate
+
 # 三大 Agent CLI（全局安装）
 RUN npm install -g --no-audit --no-fund \
         @anthropic-ai/claude-code \
