@@ -20,8 +20,54 @@ permissions:
   packages: write
 
 jobs:
-  build:
+  # --------------------------------------------------------------
+  # Stage 1: 计算本轮要构建的 ref / 上游 SHA / 小写 owner
+  # --------------------------------------------------------------
+  prepare:
+    name: Prepare build context
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+      sha_short: ${{ steps.sha.outputs.short }}
+      sha_full: ${{ steps.sha.outputs.full }}
+      owner: ${{ steps.owner.outputs.name }}
+      is_main: ${{ steps.ref.outputs.is_main }}
+    steps:
+      - name: 计算 ref
+        id: ref
+        run: |
+          REF="${{ github.event.inputs.ref }}"
+          if [ -z "$REF" ]; then REF="main"; fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          if [ "$REF" = "main" ]; then
+            echo "is_main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_main=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 读取上游 SHA
+        id: sha
+        run: |
+          FULL_SHA=$(git ls-remote "https://github.com/${{ env.UPSTREAM_REPO }}" "${{ steps.ref.outputs.ref }}" | awk '{print $1}')
+          if [ -z "$FULL_SHA" ]; then
+            # 可能是 commit hash 直接传入的情况，尝试原样使用
+            FULL_SHA="${{ steps.ref.outputs.ref }}"
+          fi
+          SHORT_SHA="${FULL_SHA:0:7}"
+          echo "short=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "full=$FULL_SHA" >> "$GITHUB_OUTPUT"
+          echo "上游 ref=${{ steps.ref.outputs.ref }}, SHA=$FULL_SHA"
+
+      - name: 归一化 owner 为小写（GHCR 要求）
+        id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------
+  # Stage 2: 并行构建上游 server / web 两个镜像
+  # --------------------------------------------------------------
+  build-upstream:
     name: Build ${{ matrix.name }}
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -35,32 +81,12 @@ jobs:
             image: multica-web
 
     steps:
-      - name: 计算要构建的 ref
-        id: ref
-        run: |
-          REF="${{ github.event.inputs.ref }}"
-          if [ -z "$REF" ]; then REF="main"; fi
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-
       - name: Checkout 上游仓库
         uses: actions/checkout@v4
         with:
           repository: ${{ env.UPSTREAM_REPO }}
-          ref: ${{ steps.ref.outputs.ref }}
+          ref: ${{ needs.prepare.outputs.ref }}
           fetch-depth: 1
-
-      - name: 读取上游 commit SHA
-        id: sha
-        run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          FULL_SHA=$(git rev-parse HEAD)
-          echo "short=$SHORT_SHA" >> "$GITHUB_OUTPUT"
-          echo "full=$FULL_SHA" >> "$GITHUB_OUTPUT"
-          echo "上游 HEAD: $FULL_SHA"
-
-      - name: 归一化 owner 为小写（GHCR 要求）
-        id: owner
-        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -76,18 +102,18 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.owner }}/${{ matrix.image }}
           tags: |
-            type=raw,value=latest,enable=${{ steps.ref.outputs.ref == 'main' }}
-            type=raw,value=${{ steps.sha.outputs.short }}
-            type=raw,value=${{ steps.ref.outputs.ref }},enable=${{ steps.ref.outputs.ref != 'main' }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.is_main == 'true' }}
+            type=raw,value=${{ needs.prepare.outputs.sha_short }}
+            type=raw,value=${{ needs.prepare.outputs.ref }},enable=${{ needs.prepare.outputs.is_main == 'false' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM_REPO }}
-            org.opencontainers.image.revision=${{ steps.sha.outputs.full }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha_full }}
             org.opencontainers.image.title=multica-${{ matrix.name }}
             org.opencontainers.image.description=Mirror build of ${{ env.UPSTREAM_REPO }} (${{ matrix.name }})
 
-      - name: 构建并推送 ${{ matrix.name }} 镜像
+      - name: 构建并推送 ${{ matrix.name }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -97,8 +123,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.ref.outputs.ref }}
-            COMMIT=${{ steps.sha.outputs.full }}
+            VERSION=${{ needs.prepare.outputs.ref }}
+            COMMIT=${{ needs.prepare.outputs.sha_full }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
@@ -107,8 +133,72 @@ jobs:
           {
             echo "## ${{ matrix.name }} 构建完成"
             echo ""
-            echo "- 上游 ref: \`${{ steps.ref.outputs.ref }}\`"
-            echo "- 上游 commit: \`${{ steps.sha.outputs.full }}\`"
+            echo "- 上游 ref: \`${{ needs.prepare.outputs.ref }}\`"
+            echo "- 上游 commit: \`${{ needs.prepare.outputs.sha_full }}\`"
+            echo "- 镜像标签："
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------
+  # Stage 3: 基于刚构建好的 multica-server 叠加三大 Agent CLI
+  # 产物：multica-server-full（超集版）
+  # --------------------------------------------------------------
+  build-server-full:
+    name: Build multica-server-full
+    needs: [prepare, build-upstream]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 本仓库（拿 Dockerfile.server-full）
+        uses: actions/checkout@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像元数据与标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.owner }}/multica-server-full
+          tags: |
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.is_main == 'true' }}
+            type=raw,value=${{ needs.prepare.outputs.sha_short }}
+            type=raw,value=${{ needs.prepare.outputs.ref }},enable=${{ needs.prepare.outputs.is_main == 'false' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM_REPO }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha_full }}
+            org.opencontainers.image.title=multica-server-full
+            org.opencontainers.image.description=multica-server + claude/codex/gemini CLIs
+
+      - name: 构建并推送 multica-server-full
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.server-full
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            MULTICA_SERVER_IMAGE=${{ env.REGISTRY }}/${{ needs.prepare.outputs.owner }}/multica-server:${{ needs.prepare.outputs.sha_short }}
+          cache-from: type=gha,scope=server-full
+          cache-to: type=gha,scope=server-full,mode=max
+
+      - name: 输出构建摘要
+        run: |
+          {
+            echo "## multica-server-full 构建完成"
+            echo ""
+            echo "- 基础镜像: \`multica-server:${{ needs.prepare.outputs.sha_short }}\`"
+            echo "- 叠加能力: claude / codex / gemini / multica(CLI)"
             echo "- 镜像标签："
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"

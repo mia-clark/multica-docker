@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1.6
+#
+# Multica Server Full — 在官方 server 镜像基础上叠加 Claude Code / Codex / Gemini 三大 Agent CLI
+#
+# 对比：
+#   multica-server       = Go 后端（精简）
+#   multica-server-full  = Go 后端 + Node 22 + claude/codex/gemini 三大 CLI
+#
+# 启动行为与 multica-server 100% 一致（同一个 ENTRYPOINT / 同一个端口 8080）
+# 额外用法：
+#   docker compose exec multica-backend claude
+#   docker compose exec multica-backend codex
+#   docker compose exec multica-backend gemini
+#   docker compose exec multica-backend multica daemon start --foreground
+
+ARG MULTICA_SERVER_IMAGE=ghcr.io/mia-clark/multica-server:latest
+
+# --- 精确抽取 Node 22 LTS 运行时（避免依赖 Alpine 仓库版本） ---
+FROM node:22-alpine AS node-runtime
+
+# --- 主镜像：在 multica-server 上叠加能力 ---
+FROM ${MULTICA_SERVER_IMAGE}
+
+USER root
+
+# 从 node:22-alpine 拷贝 Node 运行时（两者都是 alpine musl，二进制兼容）
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# 系统依赖：bash 交互、git/ssh 拉代码、ripgrep/jq 被 agent 常用
+RUN apk add --no-cache \
+        bash \
+        git \
+        curl \
+        openssh-client \
+        jq \
+        ripgrep
+
+# 三大 Agent CLI（全局安装）
+RUN npm install -g --no-audit --no-fund \
+        @anthropic-ai/claude-code \
+        @openai/codex \
+        @google/gemini-cli \
+ && npm cache clean --force
+
+# 构建期强校验：任何一个 CLI 装坏立刻失败，避免推送不可用的镜像
+RUN set -eux; \
+    node -v; \
+    npm -v; \
+    claude --version; \
+    codex --version; \
+    gemini --version; \
+    multica --version
+
+# 保留原 multica-server 的 WORKDIR=/app、ENTRYPOINT=./entrypoint.sh、EXPOSE=8080
+# 默认启动行为不变；CLI 供 exec 或 override command 使用

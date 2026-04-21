@@ -9,6 +9,22 @@
 
 ---
 
+## 📦 提供哪些镜像
+
+| 镜像 | 用途 | 大小 | 内置内容 |
+|---|---|---|---|
+| `ghcr.io/mia-clark/multica-server` | 精简版后端 | 小 | Go 后端 + multica CLI |
+| `ghcr.io/mia-clark/multica-server-full` | **全能版后端** | 大 | 精简版所有内容 + Node 22 + `claude` / `codex` / `gemini` CLI |
+| `ghcr.io/mia-clark/multica-web` | 前端 | 中 | Next.js standalone |
+
+**精简版 vs 全能版怎么选？**
+- 如果你打算把 agent daemon 跑在宿主机（官方推荐架构）→ 选 **精简版**
+- 如果你想让后端容器**自己就能调 agent CLI**，`docker exec` 进去就能用 → 选 **全能版**
+
+切换方式：改 `.env` 里的 `BACKEND_IMAGE` 一行即可，不用动 compose。
+
+---
+
 ## 🚀 快速开始（使用者）
 
 > 前置依赖：Docker 20+、Docker Compose v2
@@ -23,10 +39,13 @@ cp .env.example .env
 #    Linux/macOS:  openssl rand -hex 32
 #    Windows PS :  -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })
 
-# 3. 启动
+# 3.（可选）想要容器内置 agent CLI，把 .env 里 BACKEND_IMAGE 改成：
+#    BACKEND_IMAGE=ghcr.io/mia-clark/multica-server-full
+
+# 4. 启动
 docker compose up -d
 
-# 4. 访问
+# 5. 访问
 #    前端  http://localhost:3000
 #    后端  http://localhost:8080
 ```
@@ -45,6 +64,59 @@ docker compose down -v          # 停止并清空数据（谨慎）
 
 ---
 
+## 🤖 使用内置 Agent CLI（仅全能版）
+
+先把 `.env` 里 `BACKEND_IMAGE` 切为 `ghcr.io/mia-clark/multica-server-full`，然后 `docker compose up -d`。
+
+### 认证（任选其一）
+
+**方式 A：API Key**（推荐，开箱即用）
+
+在 `.env` 里填：
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=...
+```
+
+重启后直接可用。
+
+**方式 B：交互式登录**（适合走订阅登录态的场景）
+
+```bash
+docker compose exec backend claude login
+docker compose exec backend codex login
+docker compose exec backend gemini           # 首次运行会引导登录
+```
+
+凭据分别存在挂载卷 `claude_config` / `codex_config` / `gemini_config` 中，重启、升级镜像都不会丢。
+
+### 直接调用 CLI
+
+```bash
+docker compose exec backend claude "帮我重构这段代码"
+docker compose exec backend codex "..."
+docker compose exec backend gemini "..."
+```
+
+### 当 Multica daemon 使用
+
+在同一个 backend 容器里额外起一个 daemon：
+
+```bash
+# 先配置 self-host 指向自己的 server
+docker compose exec backend multica setup self-host --server-url http://localhost:8080
+docker compose exec backend multica login
+
+# 前台跑（查日志）
+docker compose exec backend multica daemon start --foreground
+
+# 或后台跑
+docker compose exec -d backend multica daemon start
+```
+
+---
+
 ## 🏗️ 镜像构建（维护者）
 
 ### 触发方式
@@ -56,11 +128,35 @@ docker compose down -v          # 停止并清空数据（谨慎）
 | 🕐 **定时** | 每天 UTC 00:00（北京 08:00）自动构建上游 `main` |
 | 👆 **手动** | Actions 页面点 "Run workflow"，可指定上游 `ref`（分支 / tag / commit） |
 
+### 构建结构
+
+```
+┌────────────┐
+│  prepare   │  计算 ref / sha / owner
+└─────┬──────┘
+      │
+      ├─────────────────────────┐
+      ▼                         ▼
+┌──────────────┐         ┌──────────────┐
+│  server      │         │  web         │
+│  (上游构建)  │         │  (上游构建)  │
+└──────┬───────┘         └──────────────┘
+       │
+       ▼
+┌──────────────────────┐
+│  server-full         │   FROM server:<sha> + Node + 3 CLI
+└──────────────────────┘
+```
+
+三个镜像 SHA 严格对齐，同一次构建的 `server-full:xxx` 必然基于 `server:xxx`。
+
 ### 产物镜像
 
 ```
 ghcr.io/mia-clark/multica-server:latest
 ghcr.io/mia-clark/multica-server:<short-sha>
+ghcr.io/mia-clark/multica-server-full:latest
+ghcr.io/mia-clark/multica-server-full:<short-sha>
 ghcr.io/mia-clark/multica-web:latest
 ghcr.io/mia-clark/multica-web:<short-sha>
 ```
@@ -72,40 +168,8 @@ ghcr.io/mia-clark/multica-web:<short-sha>
 GHCR 镜像首次推送默认是 **Private**，需要手动改为 **Public** 别人才能免登录拉取：
 
 1. 打开 <https://github.com/mia-clark?tab=packages>
-2. 分别点进 `multica-server` 和 `multica-web`
+2. 分别点进 `multica-server`、`multica-server-full`、`multica-web`
 3. 右侧 → **Package settings** → 滚动到 **Danger Zone** → **Change visibility** → **Public**
-
-（或者让使用者先 `docker login ghcr.io` 再 pull，但不推荐。）
-
----
-
-## 🧾 架构
-
-```
-┌────────────────────────┐
-│  multica-ai/multica    │ ← 公开源码
-└────────┬───────────────┘
-         │ 每日拉取 / 手动触发
-         ▼
-┌────────────────────────┐
-│  GitHub Actions        │
-│  (本仓库 workflow)      │
-└────────┬───────────────┘
-         │ docker push
-         ▼
-┌────────────────────────┐
-│  ghcr.io/mia-clark/*   │ ← 预构建镜像（public）
-└────────┬───────────────┘
-         │ docker compose pull
-         ▼
-┌────────────────────────┐
-│  终端用户服务器          │
-│  web + backend + pg    │
-└────────────────────────┘
-```
-
-- 目前仅构建 `linux/amd64`，如需 `arm64` 可在 workflow 的 `platforms` 中追加
-- 使用 GitHub Actions Cache 加速构建（分镜像独立 scope）
 
 ---
 
@@ -116,6 +180,8 @@ GHCR 镜像首次推送默认是 **Private**，需要手动改为 **Public** 别
 | `docker compose pull` 报 401/403 | 镜像还未改为 Public；或检查 tag 是否存在 |
 | backend 启动失败，日志 `JWT_SECRET` 相关 | `.env` 未设置或未加载 |
 | 前端登录后 WebSocket 连不上 | 反向代理场景下需把 `NEXT_PUBLIC_WS_URL` 改成 `wss://your-domain` |
+| 容器内 `claude: not found` | 当前跑的是精简版 server，需要把 `BACKEND_IMAGE` 切成 `multica-server-full` |
+| 交互式登录的 token 重启后消失 | 检查 `claude_config` 等 volume 是否被 `docker compose down -v` 清掉 |
 | 想回滚到某个旧版本 | 在 `.env` 中把 `MULTICA_TAG` 改成历史 commit 短 hash |
 
 ---

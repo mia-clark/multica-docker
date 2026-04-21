@@ -3,11 +3,18 @@
 # 使用步骤：
 #   1. cp .env.example .env
 #   2. 编辑 .env，至少设置 JWT_SECRET
+#      按需把 BACKEND_IMAGE 切换为 multica-server-full 以启用内置 agent CLI
 #   3. docker compose up -d
 #
 # 访问：
 #   前端  → http://localhost:3000
 #   后端  → http://localhost:8080
+#
+# 进入 backend 容器使用内置 CLI（需先切到 server-full 镜像）：
+#   docker compose exec backend claude
+#   docker compose exec backend codex
+#   docker compose exec backend gemini
+#   docker compose exec backend multica daemon start --foreground
 
 services:
   postgres:
@@ -29,7 +36,9 @@ services:
       - multica
 
   backend:
-    image: ghcr.io/mia-clark/multica-server:${MULTICA_TAG:-latest}
+    # 默认精简版；想要内置 agent CLI 能力，把 BACKEND_IMAGE 改为
+    # ghcr.io/mia-clark/multica-server-full
+    image: ${BACKEND_IMAGE:-ghcr.io/mia-clark/multica-server}:${MULTICA_TAG:-latest}
     container_name: multica-backend
     restart: unless-stopped
     depends_on:
@@ -40,21 +49,30 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 必须在 .env 中设置}
       PORT: "8080"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      # 可选：Google OAuth
+      # Google OAuth（可选）
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      # 可选：Resend 邮件
+      # Resend 邮件（可选）
       RESEND_API_KEY: ${RESEND_API_KEY:-}
-      # 可选：S3 / CloudFront 对象存储
+      # S3 / CloudFront 对象存储（可选）
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       S3_BUCKET: ${S3_BUCKET:-}
       S3_REGION: ${S3_REGION:-}
       CLOUDFRONT_URL: ${CLOUDFRONT_URL:-}
+      # Agent CLI API Keys（仅 server-full 镜像生效，可选；不填可通过交互式 login）
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     volumes:
       - uploads:/app/uploads
+      # Agent 凭据持久化（避免每次重启要重登录；对 server-full 镜像有用，精简版无害）
+      - claude_config:/root/.claude
+      - codex_config:/root/.codex
+      - gemini_config:/root/.gemini
+      - multica_config:/root/.multica
     networks:
       - multica
 
@@ -75,6 +93,10 @@ services:
 volumes:
   postgres_data:
   uploads:
+  claude_config:
+  codex_config:
+  gemini_config:
+  multica_config:
 
 networks:
   multica:
