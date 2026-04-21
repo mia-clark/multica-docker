@@ -1,0 +1,16 @@
+# 环境变量（含密钥，禁止提交）
+.env
+.env.local
+.env.*.local
+
+# 本地数据
+data/
+uploads/
+*.log
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

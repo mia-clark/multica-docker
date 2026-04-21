@@ -1,0 +1,116 @@
+name: Build and Push Multica Images
+
+on:
+  schedule:
+    # 每天 UTC 00:00 自动构建一次（北京时间 08:00）
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '上游 multica-ai/multica 的分支、tag 或 commit（默认 main）'
+        required: false
+        default: 'main'
+
+env:
+  UPSTREAM_REPO: multica-ai/multica
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            dockerfile: Dockerfile
+            image: multica-server
+          - name: web
+            dockerfile: Dockerfile.web
+            image: multica-web
+
+    steps:
+      - name: 计算要构建的 ref
+        id: ref
+        run: |
+          REF="${{ github.event.inputs.ref }}"
+          if [ -z "$REF" ]; then REF="main"; fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout 上游仓库
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.ref.outputs.ref }}
+          fetch-depth: 1
+
+      - name: 读取上游 commit SHA
+        id: sha
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          FULL_SHA=$(git rev-parse HEAD)
+          echo "short=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "full=$FULL_SHA" >> "$GITHUB_OUTPUT"
+          echo "上游 HEAD: $FULL_SHA"
+
+      - name: 归一化 owner 为小写（GHCR 要求）
+        id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像元数据与标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest,enable=${{ steps.ref.outputs.ref == 'main' }}
+            type=raw,value=${{ steps.sha.outputs.short }}
+            type=raw,value=${{ steps.ref.outputs.ref }},enable=${{ steps.ref.outputs.ref != 'main' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM_REPO }}
+            org.opencontainers.image.revision=${{ steps.sha.outputs.full }}
+            org.opencontainers.image.title=multica-${{ matrix.name }}
+            org.opencontainers.image.description=Mirror build of ${{ env.UPSTREAM_REPO }} (${{ matrix.name }})
+
+      - name: 构建并推送 ${{ matrix.name }} 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ref.outputs.ref }}
+            COMMIT=${{ steps.sha.outputs.full }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+      - name: 输出构建摘要
+        run: |
+          {
+            echo "## ${{ matrix.name }} 构建完成"
+            echo ""
+            echo "- 上游 ref: \`${{ steps.ref.outputs.ref }}\`"
+            echo "- 上游 commit: \`${{ steps.sha.outputs.full }}\`"
+            echo "- 镜像标签："
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
