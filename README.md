@@ -13,15 +13,31 @@
 
 | 镜像 | 用途 | 大小 | 内置内容 |
 |---|---|---|---|
-| `ghcr.io/mia-clark/multica-server` | 精简版后端 | 小 | Go 后端 + multica CLI |
-| `ghcr.io/mia-clark/multica-server-full` | **全能版后端** | 大 | 精简版所有内容 + Node 22 + `claude` / `codex` / `gemini` CLI |
+| `ghcr.io/mia-clark/multica-server-full` | ⭐ **全能版后端（默认）** | 大 | Go 后端 + `multica` CLI + Node 22 + `claude` / `codex` / `gemini` CLI + 启动期自动配置脚本 |
+| `ghcr.io/mia-clark/multica-server` | 精简版后端（备选） | 小 | Go 后端 + `multica` CLI |
 | `ghcr.io/mia-clark/multica-web` | 前端 | 中 | Next.js standalone |
 
-**精简版 vs 全能版怎么选？**
-- 如果你打算把 agent daemon 跑在宿主机（官方推荐架构）→ 选 **精简版**
-- 如果你想让后端容器**自己就能调 agent CLI**，`docker exec` 进去就能用 → 选 **全能版**
+### 两条使用路径（二选一）
 
-切换方式：改 `.env` 里的 `BACKEND_IMAGE` 一行即可，不用动 compose。
+**🌟 首选路径：全能版 + 自定义三方凭证（开箱即用）**
+
+适合绝大多数人 — 想在容器里直接跑 `claude` / `codex` / `gemini`，且走第三方统一网关 / 自建中转 / 官方直连。
+`.env` 一次性填好 `*_API_KEY` 或 `*_BASE_URL`，`docker compose up -d` 即可直接调用，**无需手动 `login`**。
+
+- `BACKEND_IMAGE` 默认就是 `multica-server-full`，不用改
+- 推荐直接使用 [`.env.example.full`](./.env.example.full) 作为起点（走反代的 ready-to-fill 模板）
+- 详细变量清单见下方「[使用内置 Agent CLI](#-使用内置-agent-cli仅全能版)」
+
+**🪶 轻量路径：精简版后端 + 宿主机跑 agent daemon**
+
+适合已经在宿主机跑 `multica daemon` 的老用户 / 不需要容器内置 CLI 的场景。
+在 `.env` 里改一行：
+
+```env
+BACKEND_IMAGE=ghcr.io/mia-clark/multica-server
+```
+
+使用基础 [`.env.example`](./.env.example) 即可，三方凭证相关字段可全部留空。
 
 ---
 
@@ -30,17 +46,24 @@
 > 前置依赖：Docker 20+、Docker Compose v2
 
 ```bash
-# 1. 下载编排文件与环境变量模板
+# 1. 下载编排文件
 curl -O https://raw.githubusercontent.com/mia-clark/multica-docker/main/docker-compose.yml
-curl -O https://raw.githubusercontent.com/mia-clark/multica-docker/main/.env.example
-cp .env.example .env
 
-# 2. 生成强随机 JWT_SECRET 并写入 .env
-#    Linux/macOS:  openssl rand -hex 32
-#    Windows PS :  -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })
+# 2. 下载 .env 模板（二选一）：
+#    🌟 首选：全能版 + 自定义三方凭证（走第三方反代场景预填好占位符）
+curl -O https://raw.githubusercontent.com/mia-clark/multica-docker/main/.env.example.full
+cp .env.example.full .env
+#    🪶 轻量：只要精简版后端（三方凭证字段留空即可）
+# curl -O https://raw.githubusercontent.com/mia-clark/multica-docker/main/.env.example
+# cp .env.example .env
 
-# 3.（可选）想要容器内置 agent CLI，把 .env 里 BACKEND_IMAGE 改成：
-#    BACKEND_IMAGE=ghcr.io/mia-clark/multica-server-full
+# 3. 编辑 .env：
+#    - JWT_SECRET：必填。生成强随机串：
+#        Linux/macOS:  openssl rand -hex 32
+#        Windows PS :  -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })
+#    - 若用了 .env.example.full：替换所有 `your-xxx` 占位符为真实值
+#    - 若走轻量路径：在 .env 里把 BACKEND_IMAGE 改为 multica-server
+#    详细字段说明见下文「使用内置 Agent CLI」
 
 # 4. 启动
 docker compose up -d
@@ -66,9 +89,11 @@ docker compose down -v          # 停止并清空数据（谨慎）
 
 ## 🤖 使用内置 Agent CLI（仅全能版）
 
-先把 `.env` 里 `BACKEND_IMAGE` 切为 `ghcr.io/mia-clark/multica-server-full`，然后 `docker compose up -d`。
+全能版镜像是默认 `BACKEND_IMAGE`，`docker compose up -d` 即携带 `claude` / `codex` / `gemini` 三大 CLI。凭证通过下面三种方式任选其一填入 `.env` 即可。
 
 ### 认证（任选其一）
+
+> **快速选路**：走官方 API → [方式 A](#方式-aapi-key-直连官方推荐开箱即用)；走第三方反代 / 自建中转 → [方式 B](#方式-b走第三方反代--自建中转填-base-url--key全家支持)；想白嫖 Claude Pro / ChatGPT Plus 订阅 → [方式 C](#方式-c交互式登录适合走-claude-pro--chatgpt-plus-订阅登录态)。三家完整变量清单见 [`.env.example`](./.env.example)（带中文注释）。
 
 **方式 A：API Key 直连官方**（推荐，开箱即用）
 
@@ -119,6 +144,17 @@ docker compose exec backend gemini           # 首次运行会引导登录
 凭据分别存在挂载卷 `claude_config` / `codex_config` / `gemini_config` 中，重启、升级镜像都不会丢。
 
 > 💡 自动生成的 Codex `config.toml` 会带 `# multica-agents-init: AUTO-GENERATED` 注释头。如果你手写过 `config.toml`，初始化脚本会检测并保留它，不会覆盖你的改动。
+
+### 启动时容器做了什么？
+
+全能版镜像的 `ENTRYPOINT` 是 [`multica-agents-init.sh`](./scripts/agents-init.sh)，它在上游 server 启动前串一遍：
+
+1. 若 `OPENAI_BASE_URL` 非空 → 根据 `OPENAI_MODEL` / `CODEX_WIRE_API` / `CODEX_PROVIDER_NAME` 自动生成 `~/.codex/config.toml`，把 Codex 的默认 provider 切到你配的 endpoint（Codex 本身不认 `OPENAI_BASE_URL` env，这一步是必须的）
+2. 若设了 `GEMINI_API_KEY` 或 `GOOGLE_GENAI_USE_VERTEXAI=true` 且 `~/.gemini/settings.json` 尚不存在 → 写入 `selectedAuthType`，跳过首次交互引导
+3. Claude Code 原生读 `ANTHROPIC_*` 环境变量，无需落盘
+4. `exec /app/entrypoint.sh "$@"` 把控制权交给上游 server 启动逻辑（端口、signal、参数全部继承）
+
+所以理想路径 = 改 `.env` → `docker compose up -d` → 进容器直接 `claude` / `codex` / `gemini`。无需 `login`，无需手挂 config 文件。
 
 ### 直接调用 CLI
 
@@ -172,9 +208,12 @@ docker compose exec -d backend multica daemon start
 └──────┬───────┘         └──────────────┘
        │
        ▼
-┌──────────────────────┐
-│  server-full         │   FROM server:<sha> + Node + 3 CLI
-└──────────────────────┘
+┌──────────────────────────────────┐
+│  server-full                     │   FROM server:<sha>
+│                                  │     + Node 22 + claude/codex/gemini
+│                                  │     + scripts/agents-init.sh
+│                                  │       (重写 ENTRYPOINT)
+└──────────────────────────────────┘
 ```
 
 三个镜像 SHA 严格对齐，同一次构建的 `server-full:xxx` 必然基于 `server:xxx`。
@@ -211,6 +250,9 @@ GHCR 镜像首次推送默认是 **Private**，需要手动改为 **Public** 别
 | 前端登录后 WebSocket 连不上 | 反向代理场景下需把 `NEXT_PUBLIC_WS_URL` 改成 `wss://your-domain` |
 | 容器内 `claude: not found` | 当前跑的是精简版 server，需要把 `BACKEND_IMAGE` 切成 `multica-server-full` |
 | 交互式登录的 token 重启后消失 | 检查 `claude_config` 等 volume 是否被 `docker compose down -v` 清掉 |
+| `codex` 改了 `.env` 但还在请求 `api.openai.com` | 1）确认镜像已切到 `multica-server-full`；2）`docker compose exec backend cat /root/.codex/config.toml` 看文件是否由 agents-init 生成（首行应带 `AUTO-GENERATED` 标记）；3）没生成的话 `docker compose up -d --force-recreate backend` |
+| Gemini 填了 `GEMINI_API_KEY` 还是弹交互式登录 | volume 里残留了老的 `~/.gemini/settings.json`，初始化脚本不会覆盖。`docker compose exec backend rm /root/.gemini/settings.json` 后 `--force-recreate backend` |
+| 想看启动脚本的日志 | `docker compose logs backend \| grep agents-init` |
 | 想回滚到某个旧版本 | 在 `.env` 中把 `MULTICA_TAG` 改成历史 commit 短 hash |
 
 ---

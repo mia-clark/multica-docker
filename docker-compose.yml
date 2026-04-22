@@ -36,9 +36,10 @@ services:
       - multica
 
   backend:
-    # 默认精简版；想要内置 agent CLI 能力，把 BACKEND_IMAGE 改为
-    # ghcr.io/mia-clark/multica-server-full
-    image: ${BACKEND_IMAGE:-ghcr.io/mia-clark/multica-server}:${MULTICA_TAG:-latest}
+    # 默认 = 全能版（内置 claude/codex/gemini CLI + 启动期自动配置）。
+    # 如果你只想要精简版（agent daemon 跑在宿主机），在 .env 里改成：
+    #   BACKEND_IMAGE=ghcr.io/mia-clark/multica-server
+    image: ${BACKEND_IMAGE:-ghcr.io/mia-clark/multica-server-full}:${MULTICA_TAG:-latest}
     container_name: multica-backend
     restart: unless-stopped
     depends_on:
