@@ -28,25 +28,26 @@ export MULTICA_SERVER_URL
 log() { printf '[runtime-entrypoint] %s\n' "$*"; }
 
 # ---------- Step 1: 指向 self-host server ----------
+# 目标 URL 与当前配置不同时 CLI 会弹 [y/N]；容器里 stdin=EOF 会被当 N 导致 Aborted，
+# 所以必须手动喂 'y'。不再 `>/dev/null`：失败时需要看到 CLI 原始输出。
 log "setup self-host: server=${MULTICA_SERVER_URL}, app=${MULTICA_APP_URL}"
-multica setup self-host \
+printf 'y\n' | multica setup self-host \
     --server-url "${MULTICA_SERVER_URL}" \
-    --app-url "${MULTICA_APP_URL}" \
-    >/dev/null
+    --app-url "${MULTICA_APP_URL}"
 
 # ---------- Step 2: 登录（PAT 免交互 / 等待手动登录） ----------
-# 登录凭据实际落盘位置由上游决定；目录非空就视为已登录
-if [ -d "${MULTICA_HOME}" ] && [ -n "$(ls -A "${MULTICA_HOME}" 2>/dev/null || true)" ]; then
-    log "detected existing auth in ${MULTICA_HOME}, skip login"
-elif [ -n "${MULTICA_TOKEN:-}" ]; then
+# MULTICA_TOKEN 非空 → 每次都登（幂等 + 覆盖指向旧 server 的残留凭据）。
+# 留空 → 交给 daemon 自己根据 volume 里的凭据判断，缺就抛 not authenticated。
+# 不再用"MULTICA_HOME 非空即已登录"做判断：setup self-host 也会往里面写配置文件，
+# 会把从未登录过的新部署误判成"已登录"，陷入 restart 循环。
+if [ -n "${MULTICA_TOKEN:-}" ]; then
     log "logging in via MULTICA_TOKEN (PAT)"
-    # `multica login --token` 交互式要求粘贴 token；通过 stdin 喂给它
     printf '%s\n' "${MULTICA_TOKEN}" | multica login --token
 else
-    log "WARN: no MULTICA_TOKEN and no existing auth."
-    log "WARN: daemon will start but fail to authenticate. Run one of:"
-    log "WARN:   docker compose exec runtime multica login --token   # paste PAT"
-    log "WARN:   docker compose exec runtime multica login           # email OTP"
+    log "no MULTICA_TOKEN; relying on persisted creds in ${MULTICA_HOME} (if any)"
+    log "if daemon aborts with 'not authenticated', run one of:"
+    log "  docker compose exec runtime multica login --token   # paste PAT"
+    log "  docker compose exec runtime multica login           # email OTP"
 fi
 
 # ---------- Step 3: 三方 Agent CLI 凭据（Codex / Gemini） ----------
