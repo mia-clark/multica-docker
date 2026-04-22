@@ -1,16 +1,19 @@
 # Multica 一键启动编排（使用预构建镜像，无需本地编译）
 #
+# 默认走「全能版 + 自定义三方凭证」首选路径：容器内置 claude/codex/gemini CLI，
+# 只要 .env 里填好 *_API_KEY 或 *_BASE_URL，启动即开箱可用。
+#
 # 使用步骤：
-#   1. cp .env.example .env
+#   1. 首选路径：cp .env.example.full .env，替换占位符
+#      轻量路径：cp .env.example .env，改 BACKEND_IMAGE=multica-server
 #   2. 编辑 .env，至少设置 JWT_SECRET
-#      按需把 BACKEND_IMAGE 切换为 multica-server-full 以启用内置 agent CLI
 #   3. docker compose up -d
 #
 # 访问：
 #   前端  → http://localhost:3000
 #   后端  → http://localhost:8080
 #
-# 进入 backend 容器使用内置 CLI（需先切到 server-full 镜像）：
+# 进入 backend 容器使用内置 CLI（全能版默认即含）：
 #   docker compose exec backend claude
 #   docker compose exec backend codex
 #   docker compose exec backend gemini
@@ -20,7 +23,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     container_name: multica-postgres
-    restart: unless-stopped
+    restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-multica}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-multica}
@@ -41,7 +44,7 @@ services:
     #   BACKEND_IMAGE=ghcr.io/mia-clark/multica-server
     image: ${BACKEND_IMAGE:-ghcr.io/mia-clark/multica-server-full}:${MULTICA_TAG:-latest}
     container_name: multica-backend
-    restart: unless-stopped
+    restart: always
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,7 +105,7 @@ services:
   web:
     image: ghcr.io/mia-clark/multica-web:${MULTICA_TAG:-latest}
     container_name: multica-web
-    restart: unless-stopped
+    restart: always
     depends_on:
       - backend
     environment:
