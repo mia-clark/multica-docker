@@ -70,7 +70,7 @@ docker compose down -v          # 停止并清空数据（谨慎）
 
 ### 认证（任选其一）
 
-**方式 A：API Key**（推荐，开箱即用）
+**方式 A：API Key 直连官方**（推荐，开箱即用）
 
 在 `.env` 里填：
 ```env
@@ -79,9 +79,36 @@ OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=...
 ```
 
-重启后直接可用。
+`docker compose up -d` 后直接可用，无需任何 `login`。
 
-**方式 B：交互式登录**（适合走订阅登录态的场景）
+**方式 B：走第三方反代 / 自建中转**（填 Base URL + Key，全家支持）
+
+| CLI | 变量 | 说明 |
+|---|---|---|
+| Claude Code | `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`（或 `ANTHROPIC_API_KEY`） | 多数反代使用 Bearer Token 方式，此时填 `AUTH_TOKEN` 而非 `API_KEY` |
+| Codex | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | 容器启动时**自动生成** `~/.codex/config.toml`，把 provider 切到你的 endpoint；可选 `OPENAI_MODEL` / `CODEX_WIRE_API`（`chat` 或 `responses`，默认 `chat`） |
+| Gemini | ⚠️ 官方 CLI **无自定义 endpoint 变量** | 要走中转只能用 Vertex 兼容的反代：填 `GOOGLE_API_KEY` + `GOOGLE_GENAI_USE_VERTEXAI=true` |
+
+示例 `.env` 片段（走某第三方统一 OpenAI / Anthropic 兼容网关）：
+
+```env
+# Claude 走反代
+ANTHROPIC_BASE_URL=https://your-proxy.example.com/anthropic
+ANTHROPIC_AUTH_TOKEN=sk-your-proxy-token
+ANTHROPIC_MODEL=claude-sonnet-4-6
+
+# Codex 走反代
+OPENAI_BASE_URL=https://your-proxy.example.com/v1
+OPENAI_API_KEY=sk-your-proxy-token
+OPENAI_MODEL=gpt-4o
+CODEX_WIRE_API=chat
+```
+
+改完 `.env` 后 `docker compose up -d`（如果镜像已在跑，用 `docker compose up -d --force-recreate backend`），三家 CLI 即可开箱调用。
+
+**方式 C：交互式登录**（适合走 Claude Pro / ChatGPT Plus 订阅登录态）
+
+API Key 走的是按量 API 计费，跟订阅 Plan 不通用。想白嫖订阅额度必须交互式登录：
 
 ```bash
 docker compose exec backend claude login
@@ -90,6 +117,8 @@ docker compose exec backend gemini           # 首次运行会引导登录
 ```
 
 凭据分别存在挂载卷 `claude_config` / `codex_config` / `gemini_config` 中，重启、升级镜像都不会丢。
+
+> 💡 自动生成的 Codex `config.toml` 会带 `# multica-agents-init: AUTO-GENERATED` 注释头。如果你手写过 `config.toml`，初始化脚本会检测并保留它，不会覆盖你的改动。
 
 ### 直接调用 CLI
 

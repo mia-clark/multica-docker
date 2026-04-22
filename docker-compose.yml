@@ -60,10 +60,32 @@ services:
       S3_BUCKET: ${S3_BUCKET:-}
       S3_REGION: ${S3_REGION:-}
       CLOUDFRONT_URL: ${CLOUDFRONT_URL:-}
-      # Agent CLI API Keys（仅 server-full 镜像生效，可选；不填可通过交互式 login）
+      # ============================================================
+      # Agent CLI 三方凭据（仅 server-full 镜像生效；留空则可走交互式 login）
+      # ============================================================
+      # --- Claude Code (Anthropic) ---
+      # BASE_URL + AUTH_TOKEN 组合用于走第三方反代/中转；官方直连只填 API_KEY 即可
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+
+      # --- Codex (OpenAI) ---
+      # OPENAI_BASE_URL 非空时，entrypoint 会自动生成 ~/.codex/config.toml，
+      # 把 provider 切到自定义 endpoint，走 OPENAI_API_KEY 鉴权
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      CODEX_WIRE_API: ${CODEX_WIRE_API:-}
+      CODEX_PROVIDER_NAME: ${CODEX_PROVIDER_NAME:-}
+
+      # --- Gemini (Google) ---
+      # 三种模式三选一：AI Studio key / Vertex key / Vertex ADC
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-}
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     volumes:

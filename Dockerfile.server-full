@@ -57,5 +57,12 @@ RUN set -eux; \
     gemini --version; \
     multica --version
 
-# 保留原 multica-server 的 WORKDIR=/app、ENTRYPOINT=./entrypoint.sh、EXPOSE=8080
-# 默认启动行为不变；CLI 供 exec 或 override command 使用
+# Agent 启动前置脚本：把 compose 灌进来的 OPENAI_BASE_URL / GEMINI_API_KEY 等
+# 翻译成各 CLI 实际需要的配置文件（尤其是 Codex 必须写 config.toml），
+# 让三家 CLI 在容器启动后无需手动 login 即可开箱即用。
+COPY scripts/agents-init.sh /usr/local/bin/multica-agents-init.sh
+RUN chmod +x /usr/local/bin/multica-agents-init.sh
+
+# 包装上游 entrypoint：先跑初始化，再 exec 原 /app/entrypoint.sh
+# WORKDIR=/app、EXPOSE=8080 等保持继承不变
+ENTRYPOINT ["/usr/local/bin/multica-agents-init.sh"]
