@@ -190,6 +190,7 @@ docker compose exec -d backend multica daemon start
 
 | 方式 | 说明 |
 |---|---|
+| 🚀 **Push** | 本仓库 `main` 分支每次 push 自动触发（连续 push 时自动取消旧构建，只保留最新） |
 | 🕐 **定时** | 每天 UTC 00:00（北京 08:00）自动构建上游 `main` |
 | 👆 **手动** | Actions 页面点 "Run workflow"，可指定上游 `ref`（分支 / tag / commit） |
 
