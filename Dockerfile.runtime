@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1.6
+#
+# Multica Runtime — 独立的 agent runtime 节点
+#
+# 定位：data plane。基于 multica-server 镜像（只为了复用 `multica` CLI 二进制），
+# 但本镜像 **不跑 server**，而是启动 `multica daemon` 作为 server 的 worker，
+# 接收任务并调用本机装好的 claude / codex / gemini CLI 去执行。
+#
+# 架构：
+#   multica-server   (control plane)  ←─WS─┐
+#   multica-web      (frontend)            │
+#   multica-runtime  (data plane)   ───────┘   ← 本镜像，可横向扩多个
+#
+# 启动：
+#   docker compose up -d runtime
+#   docker compose up -d --scale runtime=3   # 横向扩
+#
+# 手动操作：
+#   docker compose exec runtime claude "..."
+#   docker compose exec runtime multica daemon status
+#   docker compose exec runtime multica login           # 若未通过 MULTICA_TOKEN 登录
+
+ARG MULTICA_SERVER_IMAGE=ghcr.io/mia-clark/multica-server:latest
+
+FROM ${MULTICA_SERVER_IMAGE}
+
+USER root
+
+# 一次性装齐：
+#   - nodejs + npm：Alpine 3.21 仓库即带 Node 22.x LTS，apk 会自动拉齐 libstdc++ 等运行时依赖
+#   - bash / git / curl / openssh-client：agent 常用交互环境
+#   - jq / ripgrep：Claude Code 等默认调用的工具
+RUN apk add --no-cache \
+        nodejs \
+        npm \
+        bash \
+        git \
+        curl \
+        openssh-client \
+        jq \
+        ripgrep
+
+# 硬校验 Node 版本 ≥ 20，避免某些发行版降级
+RUN node -v | awk -F. '{ v=substr($1,2)+0; if (v<20) { print "Node too old: "$0; exit 1 } else { print "Node "$0" OK" } }'
+
+# 把上游放在 /app 下的 multica / migrate 二进制暴露到 PATH
+RUN ln -sf /app/multica /usr/local/bin/multica \
+ && ln -sf /app/migrate /usr/local/bin/migrate
+
+# 三大 Agent CLI（全局安装）
+RUN npm install -g --no-audit --no-fund \
+        @anthropic-ai/claude-code \
+        @openai/codex \
+        @google/gemini-cli \
+ && npm cache clean --force
+
+# 构建期强校验：任何一个 CLI 装坏立刻失败，避免推送不可用的镜像
+RUN set -eux; \
+    node -v; \
+    npm -v; \
+    claude --version; \
+    codex --version; \
+    gemini --version; \
+    multica --version
+
+# Runtime 启动脚本：setup self-host → login (PAT or wait) → 写三方 CLI 配置 → 前台 daemon
+COPY scripts/runtime-entrypoint.sh /usr/local/bin/multica-runtime-entrypoint.sh
+RUN chmod +x /usr/local/bin/multica-runtime-entrypoint.sh
+
+# 本镜像不监听任何端口（daemon 是主动连 server 的 WS 客户端）
+# 如需让上游 server EXPOSE 的端口宣告失效，可以后续加 --expose= 覆盖；
+# 这里保留继承不去主动 override，让 docker inspect 依旧能看到来源信息
+ENTRYPOINT ["/usr/local/bin/multica-runtime-entrypoint.sh"]

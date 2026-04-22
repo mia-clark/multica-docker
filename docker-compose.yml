@@ -1,23 +1,25 @@
 # Multica 一键启动编排（使用预构建镜像，无需本地编译）
 #
-# 默认走「全能版 + 自定义三方凭证」首选路径：容器内置 claude/codex/gemini CLI，
-# 只要 .env 里填好 *_API_KEY 或 *_BASE_URL，启动即开箱可用。
+# 架构：control plane / data plane 分离
+#   ┌─ server   (control plane · Go 后端 · 不含 CLI)
+#   ├─ web      (Next.js 前端)
+#   └─ runtime  (data plane · 跑 multica daemon + claude/codex/gemini CLI)
 #
 # 使用步骤：
-#   1. 首选路径：cp .env.example.full .env，替换占位符
-#      轻量路径：cp .env.example .env，改 BACKEND_IMAGE=multica-server
-#   2. 编辑 .env，至少设置 JWT_SECRET
+#   1. cp .env.example.full .env         # 首选完整模板（含 runtime 凭据占位）
+#      或 cp .env.example .env           # 最小模板
+#   2. 编辑 .env：
+#      · 必填 JWT_SECRET
+#      · runtime 要接入 server：填 MULTICA_TOKEN（Web UI 里生成 PAT）
+#      · 按需填 ANTHROPIC_* / OPENAI_* / GEMINI_* 走官方或第三方反代
 #   3. docker compose up -d
 #
 # 访问：
 #   前端  → http://localhost:3000
 #   后端  → http://localhost:8080
 #
-# 进入 backend 容器使用内置 CLI（全能版默认即含）：
-#   docker compose exec backend claude
-#   docker compose exec backend codex
-#   docker compose exec backend gemini
-#   docker compose exec backend multica daemon start --foreground
+# 横向扩 runtime（多 worker 并发跑任务）：
+#   docker compose up -d --scale runtime=3
 
 services:
   postgres:
@@ -38,12 +40,13 @@ services:
     networks:
       - multica
 
-  backend:
-    # 默认 = 全能版（内置 claude/codex/gemini CLI + 启动期自动配置）。
-    # 如果你只想要精简版（agent daemon 跑在宿主机），在 .env 里改成：
-    #   BACKEND_IMAGE=ghcr.io/mia-clark/multica-server
-    image: ${BACKEND_IMAGE:-ghcr.io/mia-clark/multica-server-full}:${MULTICA_TAG:-latest}
-    container_name: multica-backend
+  # ------------------------------------------------------------
+  # Control plane：Go 后端 + Postgres + 对 web/runtime 提供 HTTP/WS 接口
+  # 本服务不含 agent CLI，保持最小镜像 / 最小攻击面
+  # ------------------------------------------------------------
+  server:
+    image: ${SERVER_IMAGE:-ghcr.io/mia-clark/multica-server}:${MULTICA_TAG:-latest}
+    container_name: multica-server
     restart: always
     depends_on:
       postgres:
@@ -64,41 +67,62 @@ services:
       S3_BUCKET: ${S3_BUCKET:-}
       S3_REGION: ${S3_REGION:-}
       CLOUDFRONT_URL: ${CLOUDFRONT_URL:-}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    volumes:
+      - uploads:/app/uploads
+    networks:
+      - multica
+
+  # ------------------------------------------------------------
+  # Data plane：multica daemon + 三大 agent CLI
+  # 启动即 self-host 连接 server + login + foreground daemon
+  # 想扩容：docker compose up -d --scale runtime=3
+  # ------------------------------------------------------------
+  runtime:
+    image: ${RUNTIME_IMAGE:-ghcr.io/mia-clark/multica-runtime}:${MULTICA_TAG:-latest}
+    restart: always
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      # --- Multica daemon 接入 server ---
+      MULTICA_SERVER_URL: ${MULTICA_SERVER_URL:-http://server:8080}
+      MULTICA_APP_URL: ${MULTICA_APP_URL:-http://web:3000}
+      # Personal Access Token（Web UI 生成）；首次启动凭此免交互登录。
+      # 留空则 daemon 起来后等你 `docker compose exec runtime multica login`。
+      MULTICA_TOKEN: ${MULTICA_TOKEN:-}
+      # 可选：daemon 显示名 / 并发 / 超时
+      MULTICA_DAEMON_DEVICE_NAME: ${MULTICA_DAEMON_DEVICE_NAME:-}
+      MULTICA_AGENT_RUNTIME_NAME: ${MULTICA_AGENT_RUNTIME_NAME:-}
+      MULTICA_DAEMON_MAX_CONCURRENT_TASKS: ${MULTICA_DAEMON_MAX_CONCURRENT_TASKS:-}
       # ============================================================
-      # Agent CLI 三方凭据（仅 server-full 镜像生效；留空则可走交互式 login）
+      # Agent CLI 三方凭据（runtime 专属；server 不需要这些）
       # ============================================================
       # --- Claude Code (Anthropic) ---
-      # BASE_URL + AUTH_TOKEN 组合用于走第三方反代/中转；官方直连只填 API_KEY 即可
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
-
       # --- Codex (OpenAI) ---
-      # OPENAI_BASE_URL 非空时，entrypoint 会自动生成 ~/.codex/config.toml，
-      # 把 provider 切到自定义 endpoint，走 OPENAI_API_KEY 鉴权
+      # OPENAI_BASE_URL 非空时 entrypoint 会自动生成 ~/.codex/config.toml
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
       CODEX_WIRE_API: ${CODEX_WIRE_API:-}
       CODEX_PROVIDER_NAME: ${CODEX_PROVIDER_NAME:-}
-
       # --- Gemini (Google) ---
-      # 三种模式三选一：AI Studio key / Vertex key / Vertex ADC
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-}
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
       GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-}
-    ports:
-      - "${BACKEND_PORT:-8080}:8080"
     volumes:
-      - uploads:/app/uploads
-      # Agent 凭据持久化（避免每次重启要重登录；对 server-full 镜像有用，精简版无害）
+      # 登录凭据与三家 CLI 配置持久化（重启/升级不丢）
+      - multica_config:/root/.multica
       - claude_config:/root/.claude
       - codex_config:/root/.codex
       - gemini_config:/root/.gemini
-      - multica_config:/root/.multica
     networks:
       - multica
 
@@ -107,7 +131,7 @@ services:
     container_name: multica-web
     restart: always
     depends_on:
-      - backend
+      - server
     environment:
       NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${NEXT_PUBLIC_GOOGLE_CLIENT_ID:-}
       NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8080}
@@ -119,10 +143,10 @@ services:
 volumes:
   postgres_data:
   uploads:
+  multica_config:
   claude_config:
   codex_config:
   gemini_config:
-  multica_config:
 
 networks:
   multica:

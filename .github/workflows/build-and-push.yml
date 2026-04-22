@@ -149,15 +149,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # --------------------------------------------------------------
-  # Stage 3: 基于刚构建好的 multica-server 叠加三大 Agent CLI
-  # 产物：multica-server-full（超集版）
+  # Stage 3: 基于刚构建好的 multica-server 镜像复用 `multica` CLI 二进制，
+  # 叠装 claude/codex/gemini 三大 agent CLI + runtime 启动脚本。
+  # 产物：multica-runtime（data plane，跑 multica daemon 作为 server 的 worker）
   # --------------------------------------------------------------
-  build-server-full:
-    name: Build multica-server-full
+  build-runtime:
+    name: Build multica-runtime
     needs: [prepare, build-upstream]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout 本仓库（拿 Dockerfile.server-full）
+      - name: Checkout 本仓库（拿 Dockerfile.runtime）
         uses: actions/checkout@v4
 
       - name: 设置 Docker Buildx
@@ -174,7 +175,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.owner }}/multica-server-full
+          images: ${{ env.REGISTRY }}/${{ needs.prepare.outputs.owner }}/multica-runtime
           tags: |
             type=raw,value=latest,enable=${{ needs.prepare.outputs.is_main == 'true' }}
             type=raw,value=${{ needs.prepare.outputs.sha_short }}
@@ -182,30 +183,31 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM_REPO }}
             org.opencontainers.image.revision=${{ needs.prepare.outputs.sha_full }}
-            org.opencontainers.image.title=multica-server-full
-            org.opencontainers.image.description=multica-server + claude/codex/gemini CLIs
+            org.opencontainers.image.title=multica-runtime
+            org.opencontainers.image.description=Multica daemon runtime with claude/codex/gemini CLIs (data plane for self-hosted multica-server)
 
-      - name: 构建并推送 multica-server-full
+      - name: 构建并推送 multica-runtime
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.server-full
+          file: Dockerfile.runtime
           push: true
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             MULTICA_SERVER_IMAGE=${{ env.REGISTRY }}/${{ needs.prepare.outputs.owner }}/multica-server:${{ needs.prepare.outputs.sha_short }}
-          cache-from: type=gha,scope=server-full
-          cache-to: type=gha,scope=server-full,mode=max
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,scope=runtime,mode=max
 
       - name: 输出构建摘要
         run: |
           {
-            echo "## multica-server-full 构建完成"
+            echo "## multica-runtime 构建完成"
             echo ""
-            echo "- 基础镜像: \`multica-server:${{ needs.prepare.outputs.sha_short }}\`"
-            echo "- 叠加能力: claude / codex / gemini / multica(CLI)"
+            echo "- 基础镜像: \`multica-server:${{ needs.prepare.outputs.sha_short }}\`（仅复用 multica CLI 二进制）"
+            echo "- 叠加能力: claude / codex / gemini + multica daemon runtime"
+            echo "- 角色: data plane（接 server 任务，调用 agent CLI 执行）"
             echo "- 镜像标签："
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"

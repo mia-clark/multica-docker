@@ -4,40 +4,42 @@
 
 本仓库不存放业务代码，只做两件事：
 
-1. **定时/手动**从上游拉取源码，构建 Docker 镜像并推送到 **GitHub Container Registry (GHCR)**
-2. 提供 `docker-compose.yml`，让任何人用一条命令跑起整套 Multica
+1. **定时/手动/每次 push** 从上游拉取源码，构建 Docker 镜像并推送到 **GitHub Container Registry (GHCR)**
+2. 提供 `docker-compose.yml`，让任何人用一条命令跑起整套 Multica（控制面 + 数据面 + 前端）
+
+---
+
+## 🏛️ 架构
+
+Multica 采用 **control plane / data plane 分离**设计：
+
+```
+┌──────────────┐   HTTP    ┌─────────────────┐   WebSocket    ┌──────────────┐
+│   web        │ ────────► │   server        │ ◄────────────► │  runtime #1  │ ──► claude
+│   (Next.js)  │           │   (控制面)       │   注册 + 派任务  │  +3 agent    │ ──► codex
+└──────────────┘           │   Go 后端+DB    │                 │   CLI        │ ──► gemini
+                           └─────────────────┘                 └──────────────┘
+                                    ▲                           ┌──────────────┐
+                                    │  想扩就堆更多 runtime    →  │  runtime #2  │
+                                    │                           └──────────────┘
+                                    │                                  ...
+```
+
+- **server** 负责接 Web 请求、存状态、派任务
+- **runtime** 是独立 worker，启动即自动 `setup self-host` + 登录 + 注册到 server，收任务后调用本地 `claude` / `codex` / `gemini` CLI 执行
+- runtime 可横向扩：`docker compose up -d --scale runtime=3`
 
 ---
 
 ## 📦 提供哪些镜像
 
-| 镜像 | 用途 | 大小 | 内置内容 |
-|---|---|---|---|
-| `ghcr.io/mia-clark/multica-server-full` | ⭐ **全能版后端（默认）** | 大 | Go 后端 + `multica` CLI + Node 22 + `claude` / `codex` / `gemini` CLI + 启动期自动配置脚本 |
-| `ghcr.io/mia-clark/multica-server` | 精简版后端（备选） | 小 | Go 后端 + `multica` CLI |
-| `ghcr.io/mia-clark/multica-web` | 前端 | 中 | Next.js standalone |
+| 镜像 | 角色 | 内容 |
+|---|---|---|
+| `ghcr.io/mia-clark/multica-server` | 控制面 | Go 后端 + `multica` CLI（精简，不含 agent CLI） |
+| `ghcr.io/mia-clark/multica-runtime` | 数据面 | 复用 server 基底 + Node 22 + `claude` / `codex` / `gemini` CLI + runtime 启动脚本（**ENTRYPOINT 即 `multica daemon start`**） |
+| `ghcr.io/mia-clark/multica-web` | 前端 | Next.js standalone |
 
-### 两条使用路径（二选一）
-
-**🌟 首选路径：全能版 + 自定义三方凭证（开箱即用）**
-
-适合绝大多数人 — 想在容器里直接跑 `claude` / `codex` / `gemini`，且走第三方统一网关 / 自建中转 / 官方直连。
-`.env` 一次性填好 `*_API_KEY` 或 `*_BASE_URL`，`docker compose up -d` 即可直接调用，**无需手动 `login`**。
-
-- `BACKEND_IMAGE` 默认就是 `multica-server-full`，不用改
-- 推荐直接使用 [`.env.example.full`](./.env.example.full) 作为起点（走反代的 ready-to-fill 模板）
-- 详细变量清单见下方「[使用内置 Agent CLI](#-使用内置-agent-cli仅全能版)」
-
-**🪶 轻量路径：精简版后端 + 宿主机跑 agent daemon**
-
-适合已经在宿主机跑 `multica daemon` 的老用户 / 不需要容器内置 CLI 的场景。
-在 `.env` 里改一行：
-
-```env
-BACKEND_IMAGE=ghcr.io/mia-clark/multica-server
-```
-
-使用基础 [`.env.example`](./.env.example) 即可，三方凭证相关字段可全部留空。
+> ⚠️ **`multica-server-full` 已 deprecated**。它把 server 和 agent 混在一个容器里违反职责分离。现有 tag 保留不删，但不再构建新版本。迁移指南见文末「从 server-full 迁移」。
 
 ---
 
@@ -46,75 +48,74 @@ BACKEND_IMAGE=ghcr.io/mia-clark/multica-server
 > 前置依赖：Docker 20+、Docker Compose v2
 
 ```bash
-# 1. 下载编排文件
+# 1. 下载编排文件与 .env 模板（二选一）
 curl -O https://raw.githubusercontent.com/mia-clark/multica-docker/main/docker-compose.yml
 
-# 2. 下载 .env 模板（二选一）：
-#    🌟 首选：全能版 + 自定义三方凭证（走第三方反代场景预填好占位符）
+# 🌟 首选：完整模板（含 runtime 接入 + 反代凭据占位）
 curl -O https://raw.githubusercontent.com/mia-clark/multica-docker/main/.env.example.full
 cp .env.example.full .env
-#    🪶 轻量：只要精简版后端（三方凭证字段留空即可）
+
+# 🪶 最小：只要跑起来，之后手动 login
 # curl -O https://raw.githubusercontent.com/mia-clark/multica-docker/main/.env.example
 # cp .env.example .env
 
-# 3. 编辑 .env：
-#    - JWT_SECRET：必填。生成强随机串：
-#        Linux/macOS:  openssl rand -hex 32
-#        Windows PS :  -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })
-#    - 若用了 .env.example.full：替换所有 `your-xxx` 占位符为真实值
-#    - 若走轻量路径：在 .env 里把 BACKEND_IMAGE 改为 multica-server
-#    详细字段说明见下文「使用内置 Agent CLI」
+# 2. 编辑 .env：
+#    - JWT_SECRET 必填（openssl rand -hex 32）
+#    - 用了 .env.example.full：替换所有 `your-xxx` 占位符
+#    - MULTICA_TOKEN：暂时留空或占位，启动后在 Web UI 里生成 PAT 再回填
 
-# 4. 启动
+# 3. 启动（首次会拉镜像）
 docker compose up -d
 
-# 5. 访问
+# 4. 访问
 #    前端  http://localhost:3000
 #    后端  http://localhost:8080
 ```
 
+**首次 bootstrap 注意**：runtime 要连 server 必须登录一次。两种方式任选：
+
+- **方式 A（推荐）**：Web UI 登录后去 Settings → Personal Access Tokens 生成 PAT，填到 `.env` 的 `MULTICA_TOKEN`，然后 `docker compose up -d --force-recreate runtime`，runtime 自动免交互登录
+- **方式 B**：`docker compose exec runtime multica login`（邮件 OTP）；登录凭据落到 `multica_config` volume，之后重启都不用再登
+
 **常用运维：**
 
 ```bash
-docker compose logs -f          # 查看日志
-docker compose pull             # 拉取最新镜像
-docker compose up -d            # 滚动升级
-docker compose down             # 停止（数据保留）
-docker compose down -v          # 停止并清空数据（谨慎）
+docker compose logs -f                    # 所有服务日志
+docker compose logs -f runtime            # 单独看 runtime
+docker compose pull                       # 拉取最新镜像
+docker compose up -d                      # 滚动升级
+docker compose up -d --scale runtime=3    # 开 3 个 runtime 实例并发跑任务
+docker compose down                       # 停止（数据保留）
+docker compose down -v                    # 停止并清空数据（谨慎）
 ```
 
 **锁定版本**：在 `.env` 中把 `MULTICA_TAG=latest` 改为某个 commit 短 hash 或上游 tag（如 `v0.2.13`）。
 
 ---
 
-## 🤖 使用内置 Agent CLI（仅全能版）
+## 🤖 Runtime 详解
 
-全能版镜像是默认 `BACKEND_IMAGE`，`docker compose up -d` 即携带 `claude` / `codex` / `gemini` 三大 CLI。凭证通过下面三种方式任选其一填入 `.env` 即可。
+### 环境变量速览
 
-### 认证（任选其一）
-
-> **快速选路**：走官方 API → [方式 A](#方式-aapi-key-直连官方推荐开箱即用)；走第三方反代 / 自建中转 → [方式 B](#方式-b走第三方反代--自建中转填-base-url--key全家支持)；想白嫖 Claude Pro / ChatGPT Plus 订阅 → [方式 C](#方式-c交互式登录适合走-claude-pro--chatgpt-plus-订阅登录态)。三家完整变量清单见 [`.env.example`](./.env.example)（带中文注释）。
-
-**方式 A：API Key 直连官方**（推荐，开箱即用）
-
-在 `.env` 里填：
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=...
-```
-
-`docker compose up -d` 后直接可用，无需任何 `login`。
-
-**方式 B：走第三方反代 / 自建中转**（填 Base URL + Key，全家支持）
-
-| CLI | 变量 | 说明 |
+| 变量 | 作用 | 默认 |
 |---|---|---|
-| Claude Code | `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`（或 `ANTHROPIC_API_KEY`） | 多数反代使用 Bearer Token 方式，此时填 `AUTH_TOKEN` 而非 `API_KEY` |
-| Codex | `OPENAI_BASE_URL` + `OPENAI_API_KEY` | 容器启动时**自动生成** `~/.codex/config.toml`，把 provider 切到你的 endpoint；可选 `OPENAI_MODEL` / `CODEX_WIRE_API`（`chat` 或 `responses`，默认 `chat`） |
-| Gemini | ⚠️ 官方 CLI **无自定义 endpoint 变量** | 要走中转只能用 Vertex 兼容的反代：填 `GOOGLE_API_KEY` + `GOOGLE_GENAI_USE_VERTEXAI=true` |
+| `MULTICA_SERVER_URL` | daemon 连哪个 server | `http://server:8080` |
+| `MULTICA_APP_URL` | 前端访问地址（daemon 生成链接/回调用） | `http://web:3000` |
+| `MULTICA_TOKEN` | Personal Access Token，首次启动免交互登录 | 空 |
+| `MULTICA_DAEMON_ID` | 每个 runtime 唯一 ID | `$HOSTNAME`（容器名） |
+| `MULTICA_DAEMON_DEVICE_NAME` | Web UI 显示名 | 空 |
+| `MULTICA_AGENT_RUNTIME_NAME` | runtime 显示名 | 空 |
+| `MULTICA_DAEMON_MAX_CONCURRENT_TASKS` | 单个 runtime 并发任务上限 | 由 daemon 决定 |
 
-示例 `.env` 片段（走某第三方统一 OpenAI / Anthropic 兼容网关）：
+### 三方 Agent CLI 凭据（runtime 专属）
+
+| CLI | 直连官方 | 走第三方反代 |
+|---|---|---|
+| Claude Code | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` |
+| Codex | `OPENAI_API_KEY` | `OPENAI_BASE_URL` + `OPENAI_API_KEY`<br>（启动时自动生成 `~/.codex/config.toml`） |
+| Gemini | `GEMINI_API_KEY`（AI Studio） | 只能用 Vertex 兼容反代：`GOOGLE_API_KEY` + `GOOGLE_GENAI_USE_VERTEXAI=true` + `GOOGLE_CLOUD_PROJECT` |
+
+示例 `.env` 片段（走第三方统一网关）：
 
 ```env
 # Claude 走反代
@@ -129,56 +130,55 @@ OPENAI_MODEL=gpt-4o
 CODEX_WIRE_API=chat
 ```
 
-改完 `.env` 后 `docker compose up -d`（如果镜像已在跑，用 `docker compose up -d --force-recreate backend`），三家 CLI 即可开箱调用。
+改完 `.env` 后 `docker compose up -d --force-recreate runtime` 即生效。
 
-**方式 C：交互式登录**（适合走 Claude Pro / ChatGPT Plus 订阅登录态）
+### 启动时 runtime 容器做了什么？
 
-API Key 走的是按量 API 计费，跟订阅 Plan 不通用。想白嫖订阅额度必须交互式登录：
+runtime 镜像的 ENTRYPOINT 是 [`runtime-entrypoint.sh`](./scripts/runtime-entrypoint.sh)，流程：
 
-```bash
-docker compose exec backend claude login
-docker compose exec backend codex login
-docker compose exec backend gemini           # 首次运行会引导登录
-```
+1. `multica setup self-host --server-url $MULTICA_SERVER_URL --app-url $MULTICA_APP_URL`
+2. 若 `MULTICA_HOME=/root/.multica` 为空且设了 `MULTICA_TOKEN` → `echo $MULTICA_TOKEN | multica login --token` 免交互登录
+3. 若设了 `OPENAI_BASE_URL` → 自动生成 `~/.codex/config.toml`（Codex CLI 不认 env，必须写 toml）
+4. 若设了 `GEMINI_API_KEY` 或 `GOOGLE_GENAI_USE_VERTEXAI=true` 且 `~/.gemini/settings.json` 不存在 → 写入 `selectedAuthType`
+5. `exec multica daemon start --foreground --daemon-id $HOSTNAME`
 
-凭据分别存在挂载卷 `claude_config` / `codex_config` / `gemini_config` 中，重启、升级镜像都不会丢。
+理想路径 = 改 `.env` → `docker compose up -d` → runtime 自动出现在 Web UI 的 Runtimes 列表里。
 
-> 💡 自动生成的 Codex `config.toml` 会带 `# multica-agents-init: AUTO-GENERATED` 注释头。如果你手写过 `config.toml`，初始化脚本会检测并保留它，不会覆盖你的改动。
-
-### 启动时容器做了什么？
-
-全能版镜像的 `ENTRYPOINT` 是 [`multica-agents-init.sh`](./scripts/agents-init.sh)，它在上游 server 启动前串一遍：
-
-1. 若 `OPENAI_BASE_URL` 非空 → 根据 `OPENAI_MODEL` / `CODEX_WIRE_API` / `CODEX_PROVIDER_NAME` 自动生成 `~/.codex/config.toml`，把 Codex 的默认 provider 切到你配的 endpoint（Codex 本身不认 `OPENAI_BASE_URL` env，这一步是必须的）
-2. 若设了 `GEMINI_API_KEY` 或 `GOOGLE_GENAI_USE_VERTEXAI=true` 且 `~/.gemini/settings.json` 尚不存在 → 写入 `selectedAuthType`，跳过首次交互引导
-3. Claude Code 原生读 `ANTHROPIC_*` 环境变量，无需落盘
-4. `exec /app/entrypoint.sh "$@"` 把控制权交给上游 server 启动逻辑（端口、signal、参数全部继承）
-
-所以理想路径 = 改 `.env` → `docker compose up -d` → 进容器直接 `claude` / `codex` / `gemini`。无需 `login`，无需手挂 config 文件。
-
-### 直接调用 CLI
+### 手动调用 CLI
 
 ```bash
-docker compose exec backend claude "帮我重构这段代码"
-docker compose exec backend codex "..."
-docker compose exec backend gemini "..."
+docker compose exec runtime claude "帮我重构这段代码"
+docker compose exec runtime codex "..."
+docker compose exec runtime gemini "..."
+
+docker compose exec runtime multica daemon status
+docker compose exec runtime multica daemon logs
 ```
 
-### 当 Multica daemon 使用
-
-在同一个 backend 容器里额外起一个 daemon：
+### 横向扩多个 runtime
 
 ```bash
-# 先配置 self-host 指向自己的 server
-docker compose exec backend multica setup self-host --server-url http://localhost:8080
-docker compose exec backend multica login
-
-# 前台跑（查日志）
-docker compose exec backend multica daemon start --foreground
-
-# 或后台跑
-docker compose exec -d backend multica daemon start
+docker compose up -d --scale runtime=3
+docker compose ps                           # 看 3 个 runtime 容器
+docker compose logs -f --tail=100 runtime   # 多实例日志会合并输出
 ```
+
+每个实例自动用 `$HOSTNAME` 作为 `--daemon-id`，互不冲突。它们都从同一个 `multica_config` volume 读凭据（所以只需要登录一次）。
+
+---
+
+## 🔄 从 server-full 迁移
+
+如果你之前部署的是 `multica-server-full`（backend 单容器装 CLI），迁移到新架构：
+
+1. **备份**（可选）：`docker compose down`（保留 volume）
+2. **拉最新编排**：`curl -O .../docker-compose.yml`（`backend` → `server` + `runtime` 二分）
+3. **更新 `.env`**：
+   - `BACKEND_IMAGE` → 删除，改用 `SERVER_IMAGE` + `RUNTIME_IMAGE`
+   - 新增 `MULTICA_SERVER_URL` / `MULTICA_APP_URL` / `MULTICA_TOKEN`
+4. `docker compose pull && docker compose up -d`
+5. 老的 `claude_config` / `codex_config` / `gemini_config` volume 名字没变，凭据无缝继承给 runtime；`multica_config` 同理
+6. 旧 `backend` 容器可以删：`docker rm -f multica-backend`
 
 ---
 
@@ -186,7 +186,7 @@ docker compose exec -d backend multica daemon start
 
 ### 触发方式
 
-工作流 [`.github/workflows/build-and-push.yml`](./.github/workflows/build-and-push.yml) 支持两种触发：
+工作流 [`.github/workflows/build-and-push.yml`](./.github/workflows/build-and-push.yml) 支持三种触发：
 
 | 方式 | 说明 |
 |---|---|
@@ -210,22 +210,22 @@ docker compose exec -d backend multica daemon start
        │
        ▼
 ┌──────────────────────────────────┐
-│  server-full                     │   FROM server:<sha>
+│  runtime                         │   FROM server:<sha>
 │                                  │     + Node 22 + claude/codex/gemini
-│                                  │     + scripts/agents-init.sh
-│                                  │       (重写 ENTRYPOINT)
+│                                  │     + scripts/runtime-entrypoint.sh
+│                                  │     ENTRYPOINT = multica daemon
 └──────────────────────────────────┘
 ```
 
-三个镜像 SHA 严格对齐，同一次构建的 `server-full:xxx` 必然基于 `server:xxx`。
+三个镜像 SHA 严格对齐，同一次构建的 `runtime:xxx` 必然基于 `server:xxx`。
 
 ### 产物镜像
 
 ```
 ghcr.io/mia-clark/multica-server:latest
 ghcr.io/mia-clark/multica-server:<short-sha>
-ghcr.io/mia-clark/multica-server-full:latest
-ghcr.io/mia-clark/multica-server-full:<short-sha>
+ghcr.io/mia-clark/multica-runtime:latest
+ghcr.io/mia-clark/multica-runtime:<short-sha>
 ghcr.io/mia-clark/multica-web:latest
 ghcr.io/mia-clark/multica-web:<short-sha>
 ```
@@ -237,7 +237,7 @@ ghcr.io/mia-clark/multica-web:<short-sha>
 GHCR 镜像首次推送默认是 **Private**，需要手动改为 **Public** 别人才能免登录拉取：
 
 1. 打开 <https://github.com/mia-clark?tab=packages>
-2. 分别点进 `multica-server`、`multica-server-full`、`multica-web`
+2. 分别点进 `multica-server`、`multica-runtime`、`multica-web`
 3. 右侧 → **Package settings** → 滚动到 **Danger Zone** → **Change visibility** → **Public**
 
 ---
@@ -247,13 +247,13 @@ GHCR 镜像首次推送默认是 **Private**，需要手动改为 **Public** 别
 | 现象 | 排查方向 |
 |---|---|
 | `docker compose pull` 报 401/403 | 镜像还未改为 Public；或检查 tag 是否存在 |
-| backend 启动失败，日志 `JWT_SECRET` 相关 | `.env` 未设置或未加载 |
-| 前端登录后 WebSocket 连不上 | 反向代理场景下需把 `NEXT_PUBLIC_WS_URL` 改成 `wss://your-domain` |
-| 容器内 `claude: not found` | 当前跑的是精简版 server，需要把 `BACKEND_IMAGE` 切成 `multica-server-full` |
-| 交互式登录的 token 重启后消失 | 检查 `claude_config` 等 volume 是否被 `docker compose down -v` 清掉 |
-| `codex` 改了 `.env` 但还在请求 `api.openai.com` | 1）确认镜像已切到 `multica-server-full`；2）`docker compose exec backend cat /root/.codex/config.toml` 看文件是否由 agents-init 生成（首行应带 `AUTO-GENERATED` 标记）；3）没生成的话 `docker compose up -d --force-recreate backend` |
-| Gemini 填了 `GEMINI_API_KEY` 还是弹交互式登录 | volume 里残留了老的 `~/.gemini/settings.json`，初始化脚本不会覆盖。`docker compose exec backend rm /root/.gemini/settings.json` 后 `--force-recreate backend` |
-| 想看启动脚本的日志 | `docker compose logs backend \| grep agents-init` |
+| server 启动失败，日志 `JWT_SECRET` 相关 | `.env` 未设置或未加载 |
+| 前端登录后 WebSocket 连不上 | 后端日志看 `ws: rejected origin`：把实际访问的 origin 加进 `CORS_ORIGINS`；反向代理场景把 `NEXT_PUBLIC_WS_URL` 改成 `wss://your-domain` |
+| runtime 一直 Restarting | `docker compose logs runtime`：最常见是没登录（`MULTICA_TOKEN` 空 + `multica_config` volume 空），跑 `docker compose exec runtime multica login` |
+| runtime 不出现在 Web UI 的 Runtimes 列表 | 登录凭据不对或 server URL 不对。`docker compose exec runtime multica daemon status` 看连接状态；`MULTICA_SERVER_URL` 是否 runtime 容器能访问到 |
+| `codex` 没走反代 | `docker compose exec runtime cat /root/.codex/config.toml`：首行要有 `AUTO-GENERATED` 标记；没生成说明 `OPENAI_BASE_URL` 没传进来 |
+| Gemini 填了 key 还弹交互式登录 | `docker compose exec runtime rm /root/.gemini/settings.json` 后 `--force-recreate runtime` 让脚本重写 |
+| 想看启动脚本日志 | `docker compose logs runtime \| grep runtime-entrypoint` |
 | 想回滚到某个旧版本 | 在 `.env` 中把 `MULTICA_TAG` 改成历史 commit 短 hash |
 
 ---
