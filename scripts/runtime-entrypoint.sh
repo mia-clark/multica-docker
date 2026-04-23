@@ -28,12 +28,14 @@ export MULTICA_SERVER_URL
 log() { printf '[runtime-entrypoint] %s\n' "$*"; }
 
 # ---------- Step 1: 指向 self-host server ----------
-# 目标 URL 与当前配置不同时 CLI 会弹 [y/N]；容器里 stdin=EOF 会被当 N 导致 Aborted，
-# 所以必须手动喂 'y'。不再 `>/dev/null`：失败时需要看到 CLI 原始输出。
+# 必须用原子命令 `multica config set`，绝不能用 `multica setup self-host`。
+# 上游 cmd_setup.go:runSetupSelfHost 在写完配置后会**自动** runLogin() +
+# runDaemonBackground()，runLogin 默认走浏览器授权流程（弹 cli_callback URL
+# 然后 Waiting for authentication…），容器里无浏览器可开，会死等。
+# config set 只改 /root/.multica/config.json，Step 2 的 multica login --token 才能接手。
 log "setup self-host: server=${MULTICA_SERVER_URL}, app=${MULTICA_APP_URL}"
-printf 'y\n' | multica setup self-host \
-    --server-url "${MULTICA_SERVER_URL}" \
-    --app-url "${MULTICA_APP_URL}"
+multica config set server_url "${MULTICA_SERVER_URL}"
+multica config set app_url "${MULTICA_APP_URL}"
 
 # ---------- Step 2: 登录（PAT 免交互 / 等待手动登录） ----------
 # MULTICA_TOKEN 非空 → 每次都登（幂等 + 覆盖指向旧 server 的残留凭据）。
