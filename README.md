@@ -72,10 +72,46 @@ docker compose up -d
 #    后端  http://localhost:8080
 ```
 
-**首次 bootstrap 注意**：runtime 要连 server 必须登录一次。两种方式任选：
+**首次 bootstrap 注意**：runtime 要连 server 必须登录一次。三种方式任选：
 
 - **方式 A（推荐）**：Web UI 登录后去 Settings → Personal Access Tokens 生成 PAT，填到 `.env` 的 `MULTICA_TOKEN`，然后 `docker compose up -d --force-recreate runtime`，runtime 自动免交互登录
 - **方式 B**：`docker compose exec runtime multica login`（邮件 OTP）；登录凭据落到 `multica_config` volume，之后重启都不用再登
+- **方式 C（全 headless，无需 Web UI）**：适合内网 / 家庭服务器 / CI 流水线，见下一节
+
+### Bootstrap without Web UI（方式 C）
+
+内网自托管、CI 流水线、或就是懒得点浏览器？用 [`scripts/bootstrap-pat.sh`](./scripts/bootstrap-pat.sh) 直接走上游 HTTP API（`send-code → verify-code → workspace → PAT`）一把梭：
+
+```powershell
+# 1. 在 .env 里临时加一行（bootstrap 用完就删）
+#    APP_ENV=development
+# 这会启用验证码主码 888888；server 重启后生效。
+
+# 2. 起 postgres + server
+docker compose up -d server
+
+# 3. 在临时 runtime 容器里跑脚本（借容器内的 curl + jq）
+docker compose run --rm --no-deps `
+    --entrypoint /bootstrap/bootstrap-pat.sh `
+    -v "${PWD}/scripts/bootstrap-pat.sh:/bootstrap/bootstrap-pat.sh:ro" `
+    runtime
+# 输出最后一行形如：MULTICA_TOKEN=mul_pat_xxxxxxxx...
+
+# 4. 把那行 PAT 覆盖到 .env 的 MULTICA_TOKEN=
+# 5. 从 .env 删除 APP_ENV=development（安全起见）
+# 6. 起全栈
+docker compose up -d
+```
+
+**为什么脚本里要主动建 workspace？** 上游 `multica login --token` 成功后会调 `autoWatchWorkspaces()`，若该用户 0 workspace，会阻塞 5 分钟等用户在浏览器里创建。提前建好就能秒启 daemon。
+
+**Linux/macOS 用户** 把反引号换行改成反斜杠 `\` 即可。
+
+**不想开 `APP_ENV=development`？** 两条替代路径（脚本都兼容）：
+- 配 `RESEND_API_KEY` 走真邮件：`BOOTSTRAP_EMAIL=you@example.com OTP_CODE=<邮件里的6位> sh bootstrap-pat.sh`
+- 从 backend 日志捞 server 打印的 code：`docker compose logs server 2>&1 | Select-String 'Verification code'`，然后 `OTP_CODE=<6位>` 执行脚本
+
+⚠️ **安全警告**：`APP_ENV=development` 会让任何知道邮箱的人用 `888888` 登录。**只在 bootstrap 时短开，跑完 PAT 立刻删掉**。公网直连的实例绝对不要打开。
 
 **常用运维：**
 

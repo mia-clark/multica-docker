@@ -56,6 +56,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 必须在 .env 中设置}
       PORT: "8080"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # APP_ENV=development 会启用验证码主码 888888（仅用于 bootstrap 免 Web UI 签 PAT，
+      # bootstrap 完成后应改回 production 或删掉，避免公网上谁都能登）。
+      APP_ENV: ${APP_ENV:-production}
       # Google OAuth（可选）
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -72,7 +75,11 @@ services:
     volumes:
       - uploads:/app/uploads
     networks:
-      - multica
+      multica:
+        # 历史别名：web 镜像内部 Next.js 代理目标仍硬编码为 http://backend:8080。
+        # 待上游 multica-web 改用环境变量（如 BACKEND_URL）后可移除。
+        aliases:
+          - backend
 
   # ------------------------------------------------------------
   # Data plane：multica daemon + 三大 agent CLI
