@@ -9,8 +9,12 @@
 #   1) setup self-host：把 CLI 指向你自建的 server（默认 http://server:8080）
 #   2) 如果还没登录过凭据，用 MULTICA_TOKEN (PAT) 免交互登录
 #      没 TOKEN 就等用户手动 `docker compose exec runtime multica login`
-#   3) 根据 OPENAI_BASE_URL / GEMINI_API_KEY 等自动生成
-#      ~/.codex/config.toml、~/.gemini/settings.json
+#   3) 三方 Agent CLI 初始化：
+#        · Claude：跳 onboarding + 写 ~/.claude/settings.json
+#          （env 鉴权 / 模型映射 / Bash·Write 等权限白名单）
+#        · Codex：写 ~/.codex/config.toml（provider 切反代 +
+#          approval_policy=never / sandbox=danger-full-access / trust_level=trusted）
+#        · Gemini：写 ~/.gemini/settings.json（selectedAuthType）
 #   4) exec 前台 daemon，接管 PID 1
 #
 # 幂等性：重启容器重跑本脚本无副作用。
@@ -81,9 +85,89 @@ else
     log "  docker compose exec runtime multica login           # email OTP"
 fi
 
-# ---------- Step 3: 三方 Agent CLI 凭据（Codex / Gemini） ----------
+# ---------- Step 3: 三方 Agent CLI 凭据（Claude / Codex / Gemini） ----------
+
+# Claude Code：跳 onboarding + 写 settings.json（认证 + 模型映射 + 权限白名单）
+# data plane worker 需要：
+#   1) 容器里没 TTY，首次 onboarding 向导会卡死 → 预置 ~/.claude.json
+#   2) 清 .credentials.json 残留，避免与环境变量鉴权打架
+#   3) AUTH_TOKEN 优先（主流反代 Bearer），只填 API_KEY 则走 x-api-key
+#      ❗不把 API_KEY 强转 AUTH_TOKEN —— 会让只认 x-api-key 的反代 401
+#   4) permissions.allow 全开（Bash/Write/Edit 等 9 项），不然 daemon 派的任务基本跑不了
+init_claude() {
+    if [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        log "claude: no ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY, skipping init"
+        return 0
+    fi
+
+    claude_dir="/root/.claude"
+    mkdir -p "${claude_dir}"
+
+    if [ ! -f "/root/.claude.json" ]; then
+        printf '%s\n' '{"hasCompletedOnboarding": true}' > /root/.claude.json
+        log "claude: wrote /root/.claude.json (skip onboarding)"
+    fi
+
+    rm -f "${claude_dir}/.credentials.json"
+
+    if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+        auth_key="ANTHROPIC_AUTH_TOKEN"
+        auth_val="${ANTHROPIC_AUTH_TOKEN}"
+        unset ANTHROPIC_API_KEY
+    else
+        auth_key="ANTHROPIC_API_KEY"
+        auth_val="${ANTHROPIC_API_KEY}"
+    fi
+
+    base_url="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+    # ANTHROPIC_MODEL 作为三档模型的 fallback；都不填则用 claude-sonnet-4-6 兜底
+    default_model="${ANTHROPIC_MODEL:-claude-sonnet-4-6}"
+    opus_model="${ANTHROPIC_DEFAULT_OPUS_MODEL:-${default_model}}"
+    sonnet_model="${ANTHROPIC_DEFAULT_SONNET_MODEL:-${default_model}}"
+    haiku_model="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-${default_model}}"
+    api_timeout="${API_TIMEOUT_MS:-3000000}"
+
+    settings="${claude_dir}/settings.json"
+    cat > "${settings}" <<EOF
+{
+  "_comment": "multica-runtime: AUTO-GENERATED — delete to regenerate from env on next start",
+  "alwaysThinkingEnabled": true,
+  "env": {
+    "${auth_key}": "${auth_val}",
+    "ANTHROPIC_BASE_URL": "${base_url}",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "${opus_model}",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "${sonnet_model}",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${haiku_model}",
+    "API_TIMEOUT_MS": "${api_timeout}",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "MultiEdit(*)",
+      "WebFetch(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "LS(*)"
+    ],
+    "deny": []
+  }
+}
+EOF
+    log "claude: wrote ${settings} (auth=${auth_key}, base=${base_url}, model=${default_model})"
+}
+
+# Codex：写 config.toml（provider 切反代 + 容器自动化所需的无交互参数）
+# data plane worker 需要：
+#   - approval_policy=never / sandbox=danger-full-access / trust_level=trusted
+#     容器本身就是隔离壳，codex 内置 sandbox 会拦 Bash 写入，用 danger-full-access 禁掉
+#     ⚠️ 若未来挂宿主机目录进容器，任务能写回宿主机；当前 compose 只挂配置 volume，安全
+#   - 触发条件用 OPENAI_API_KEY 非空（走官方也要初始化，不能只看 BASE_URL）
 init_codex() {
-    [ -n "${OPENAI_BASE_URL:-}" ] || return 0
+    [ -n "${OPENAI_API_KEY:-}" ] || return 0
 
     codex_dir="${CODEX_HOME:-/root/.codex}"
     codex_conf="${codex_dir}/config.toml"
@@ -96,6 +180,7 @@ init_codex() {
 
     provider_name="${CODEX_PROVIDER_NAME:-multica-custom}"
     model_name="${OPENAI_MODEL:-gpt-4o-mini}"
+    base_url="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
     wire_api="${CODEX_WIRE_API:-chat}"
     case "${wire_api}" in
         chat|responses) ;;
@@ -107,16 +192,22 @@ init_codex() {
 
     cat > "${codex_conf}" <<EOF
 # multica-runtime: AUTO-GENERATED — delete to regenerate from env on next start
-model_provider = "${provider_name}"
 model = "${model_name}"
+model_provider = "${provider_name}"
+approval_policy = "never"
+sandbox = "danger-full-access"
+project_doc_fallback_filenames = ["SKILL.md", "AGENTS.md"]
 
 [model_providers.${provider_name}]
 name = "${provider_name}"
-base_url = "${OPENAI_BASE_URL}"
+base_url = "${base_url}"
 wire_api = "${wire_api}"
 env_key = "OPENAI_API_KEY"
+
+[projects."/"]
+trust_level = "trusted"
 EOF
-    log "codex: wrote ${codex_conf} (provider=${provider_name}, model=${model_name})"
+    log "codex: wrote ${codex_conf} (provider=${provider_name}, model=${model_name}, base=${base_url})"
 }
 
 init_gemini() {
@@ -143,6 +234,7 @@ EOF
     log "gemini: wrote ${gemini_settings} (authType=${auth_type})"
 }
 
+init_claude
 init_codex
 init_gemini
 
