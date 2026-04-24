@@ -21,11 +21,40 @@ set -eu
 MULTICA_SERVER_URL="${MULTICA_SERVER_URL:-http://server:8080}"
 MULTICA_APP_URL="${MULTICA_APP_URL:-http://localhost:3000}"
 MULTICA_HOME="${MULTICA_HOME:-/root/.multica}"
-DAEMON_ID="${MULTICA_DAEMON_ID:-$(hostname)}"
 
 export MULTICA_SERVER_URL
 
 log() { printf '[runtime-entrypoint] %s\n' "$*"; }
+
+# ---------- daemon_id 持久化 ----------
+# 默认把 daemon 身份写到 $MULTICA_HOME/daemon_id（跟 volume 走）。
+# 目的：容器重建 → hostname 随容器 ID 变 → 旧做法把 hostname 当 daemon_id
+#       会让 server 每次都注册成一个全新 runtime，界面上的 runtime 列表
+#       每 down+up 一次就多一份，旧的留作僵尸。
+#
+# 优先级：MULTICA_DAEMON_ID 环境变量 > 持久化文件 > 新生成 UUID。
+#
+# 注意：若 `docker compose up --scale runtime>1`，命名 volume multica_config
+# 会被所有副本共享，它们会抢同一个 daemon_id。scale 场景请为每个 replica
+# 挂独立 volume，或给每个副本显式注入不同的 MULTICA_DAEMON_ID。
+resolve_daemon_id() {
+    if [ -n "${MULTICA_DAEMON_ID:-}" ]; then
+        printf '%s' "${MULTICA_DAEMON_ID}"
+        return
+    fi
+    mkdir -p "${MULTICA_HOME}"
+    id_file="${MULTICA_HOME}/daemon_id"
+    if [ -s "${id_file}" ]; then
+        cat "${id_file}"
+        return
+    fi
+    new_id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null \
+        || head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    printf '%s\n' "${new_id}" > "${id_file}"
+    printf '%s' "${new_id}"
+}
+
+DAEMON_ID="$(resolve_daemon_id)"
 
 # ---------- Step 1: 指向 self-host server ----------
 # 必须用原子命令 `multica config set`，绝不能用 `multica setup self-host`。
